@@ -216,6 +216,7 @@
   <header>
     <h1>Наша копилка</h1>
     <p>Копим на цель — <b id="goalLabel"></b></p>
+    <p id="status" style="font-size:13px;margin-top:2px;"></p>
   </header>
 
   <div class="stage">
@@ -311,24 +312,48 @@
 
 <div class="toast" id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
+/* ============================================================
+   НАСТРОЙКА СИНХРОНИЗАЦИИ — заполните 2 строки ниже
+   (как их получить — см. инструкцию, которую дал помощник)
+   ============================================================ */
+const SUPABASE_URL = "https://gapekgflfvodzetwkrlo.supabase.co";
+const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdhcGVrZ2ZsZnZvZHpldHdrcmxvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAxNDAwNDUsImV4cCI6MjA5NTcxNjA0NX0.CtoFedyFlH4t1_pas1n2gP4UB49MnbK6_t-Y2-xYC74";
+/* ============================================================ */
+
 const GOAL = 85000;
-const KEY = 'kopilka_entries_v1';
+const KEY = 'kopilka_entries_v1';        // запасное локальное хранилище
 let entries = [];
+let cloud = null;                        // клиент Supabase, если настроен
 
 const fmt = n => n.toLocaleString('ru-RU');
+const configured = () => SUPABASE_URL.startsWith('http') && SUPABASE_KEY.length > 20;
 
-function load(){
-  try{ entries = JSON.parse(localStorage.getItem(KEY)) || []; }
-  catch(e){ entries = []; }
+/* ---------- ХРАНИЛИЩЕ ---------- */
+async function loadAll(){
+  if(cloud){
+    const { data, error } = await cloud.from('entries').select('*').order('t',{ascending:true});
+    if(error){ console.error(error); setStatus('Ошибка загрузки',false); return; }
+    entries = data.map(r=>({id:r.id, amount:r.amount, label:r.label, icon:r.icon, t:r.t}));
+    render();
+  }else{
+    try{ entries = JSON.parse(localStorage.getItem(KEY)) || []; }catch(e){ entries = []; }
+    render();
+  }
 }
-function save(){ localStorage.setItem(KEY, JSON.stringify(entries)); }
+function saveLocal(){ localStorage.setItem(KEY, JSON.stringify(entries)); }
 
-function total(){ return entries.reduce((s,e)=>s+e.amount,0); }
-
-function add(amount, label, icon){
-  entries.push({id:Date.now()+Math.random(), amount, label, icon, t:Date.now()});
-  save(); render(); toast(`+${fmt(amount)} ₽ • ${label}`);
+async function add(amount, label, icon){
+  const row = {id:(crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random())),
+               amount, label, icon, t:Date.now()};
+  if(cloud){
+    entries.push(row); render(); toast(`+${fmt(amount)} ₽ • ${label}`);
+    const { error } = await cloud.from('entries').insert(row);
+    if(error){ console.error(error); toast('Не сохранилось в облако'); }
+  }else{
+    entries.push(row); saveLocal(); render(); toast(`+${fmt(amount)} ₽ • ${label}`);
+  }
 }
 function addCustom(){
   const a = Math.round(parseFloat(document.getElementById('cAmount').value));
@@ -339,14 +364,19 @@ function addCustom(){
   document.getElementById('cAmount').value='';
   document.getElementById('cLabel').value='';
 }
-function del(id){
-  entries = entries.filter(e=>e.id!==id);
-  save(); render();
+async function del(id){
+  entries = entries.filter(e=>e.id!==id); render();
+  if(cloud){ const {error}=await cloud.from('entries').delete().eq('id',id); if(error)console.error(error); }
+  else saveLocal();
 }
-function clearAll(){
-  if(entries.length && confirm('Очистить всю историю и обнулить копилку?')){
-    entries=[]; save(); render();
-  }
+async function clearAll(){
+  if(!entries.length) return;
+  if(!confirm('Очистить всю историю и обнулить копилку?')) return;
+  if(cloud){
+    const ids = entries.map(e=>e.id);
+    entries=[]; render();
+    const {error}=await cloud.from('entries').delete().in('id',ids); if(error)console.error(error);
+  }else{ entries=[]; saveLocal(); render(); }
 }
 
 function toast(msg){
@@ -355,13 +385,15 @@ function toast(msg){
   clearTimeout(t._tm); t._tm=setTimeout(()=>t.classList.remove('show'),1800);
 }
 
-// этапы дерева по проценту
+function total(){ return entries.reduce((s,e)=>s+e.amount,0); }
+
+/* ---------- ДЕРЕВО ---------- */
 function treeStage(pct){
-  if(pct < 5)  return 0; // семечко/росток
-  if(pct < 35) return 1; // ствол + 1 листва
-  if(pct < 65) return 2; // + боковые
-  if(pct < 100)return 3; // полная крона
-  return 4;              // плоды
+  if(pct < 5)  return 0;
+  if(pct < 35) return 1;
+  if(pct < 65) return 2;
+  if(pct < 100)return 3;
+  return 4;
 }
 const STAGE_LABELS = ['Семечко 🌱','Росток 🌿','Деревце 🌳','Крепкое дерево 🌳','Цветёт и плодоносит! 🎉'];
 
@@ -373,18 +405,15 @@ function setTree(pct){
   const L=[null,document.getElementById('l1'),document.getElementById('l2'),
            document.getElementById('l3'),document.getElementById('l4')];
   const fruits=document.getElementById('fruits');
-
   const show=(el,on,scale)=>{ el.style.opacity=on?1:0; el.style.transform=`scale(${on?(scale||1):0})`; };
-
   show(sprout, st===0, 1);
   trunk.style.transform = st>=1 ? 'scaleY(1)' : 'scaleY(0)';
-  show(L[1], st>=1);
-  show(L[4], st>=1);
-  show(L[2], st>=2);
-  show(L[3], st>=2);
+  show(L[1], st>=1); show(L[4], st>=1);
+  show(L[2], st>=2); show(L[3], st>=2);
   show(fruits, st>=4);
 }
 
+/* ---------- ОТРИСОВКА ---------- */
 function render(){
   const tot = total();
   const pct = Math.min(100, tot/GOAL*100);
@@ -394,7 +423,6 @@ function render(){
   document.getElementById('liquid').style.height = pct+'%';
   setTree(pct);
 
-  // история
   const list=document.getElementById('list');
   const empty=document.getElementById('empty');
   list.innerHTML='';
@@ -418,11 +446,17 @@ function render(){
 }
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
-// деления на капсуле
+function setStatus(text, ok){
+  const el=document.getElementById('status');
+  if(!el) return;
+  el.textContent=text;
+  el.style.color = ok ? '#2a9d76' : '#c0703f';
+}
+
+/* ---------- ДЕКОР КАПСУЛЫ ---------- */
 (function(){
   const ticks=document.getElementById('ticks');
   for(let i=1;i<10;i++){const s=document.createElement('span');s.style.bottom=(i*10)+'%';ticks.appendChild(s);}
-  // пузырьки
   const b=document.getElementById('bubbles');
   for(let i=0;i<7;i++){
     const sp=document.createElement('span');
@@ -439,8 +473,22 @@ document.getElementById('goalLabel').textContent = fmt(GOAL)+' ₽';
 document.getElementById('cAmount').addEventListener('keydown',e=>{if(e.key==='Enter')addCustom();});
 document.getElementById('cLabel').addEventListener('keydown',e=>{if(e.key==='Enter')addCustom();});
 
-load();
-render();
+/* ---------- ЗАПУСК ---------- */
+(async function init(){
+  if(configured() && window.supabase){
+    cloud = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    setStatus('☁️ Синхронизация включена', true);
+    await loadAll();
+    // живое обновление при изменениях с других устройств
+    cloud.channel('entries-changes')
+      .on('postgres_changes', { event:'*', schema:'public', table:'entries' }, loadAll)
+      .subscribe();
+  }else{
+    setStatus('📱 Локальный режим (без синхронизации)', false);
+    await loadAll();
+  }
+})();
 </script>
+
 </body>
 </html>
